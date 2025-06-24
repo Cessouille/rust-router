@@ -22,11 +22,21 @@ fn main() {
     let mut handle: Option<std::thread::JoinHandle<()>> = None;
 
     loop {
-        println!("Rust Router CLI");
+        println!("\n==============================");
+        println!("      Rust Router CLI");
+        println!("==============================");
+        println!(
+            "Dynamic routing: {}",
+            if running.load(Ordering::SeqCst) {
+                "ENABLED"
+            } else {
+                "DISABLED"
+            }
+        );
         println!("1. Enable/Disable dynamic routing");
         println!("2. List last known neighbor routers");
         println!("3. Exit");
-        print!("Enter your choice: ");
+        print!("> Enter your choice: ");
         io::stdout().flush().unwrap();
 
         let mut choice = String::new();
@@ -34,13 +44,13 @@ fn main() {
         match choice.trim() {
             "1" => {
                 if running.load(Ordering::SeqCst) {
-                    println!("Disabling dynamic routing...");
+                    println!("\n[!] Disabling dynamic routing...");
                     running.store(false, Ordering::SeqCst);
                     if let Some(h) = handle.take() {
                         h.join().ok();
                     }
                 } else {
-                    println!("Enabling dynamic routing...");
+                    println!("\n[+] Enabling dynamic routing...");
                     running.store(true, Ordering::SeqCst);
                     let running_clone = running.clone();
                     let neighbors_clone = neighbors.clone();
@@ -53,14 +63,14 @@ fn main() {
                 list_neighbors(&neighbors);
             }
             "3" => {
-                println!("Exiting.");
+                println!("\nExiting. Goodbye!");
                 running.store(false, Ordering::SeqCst);
                 if let Some(h) = handle.take() {
                     h.join().ok();
                 }
                 break;
             }
-            _ => println!("Invalid choice!"),
+            _ => println!("\n[!] Invalid choice! Please enter 1, 2, or 3."),
         }
     }
 }
@@ -213,12 +223,14 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
 
 fn list_neighbors(neighbors: &Arc<Mutex<HashMap<Ipv4Addr, String>>>) {
     let neigh = neighbors.lock().unwrap();
+    println!("\n------------------------------");
     if neigh.is_empty() {
         println!("No neighbors discovered yet.");
     } else {
         println!("Last known neighbor routers:");
         for (ip, name) in neigh.iter() {
-            println!("{} - {}", ip, name);
+            println!("  • {:<15}  {}", ip, name);
         }
     }
+    println!("------------------------------");
 }
