@@ -20,7 +20,12 @@ fn main() {
     for iface in &interfaces {
         for ip in &iface.ips {
             if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
-                local_networks.push(ipv4.to_string());
+                let ip_str = format!("{}/{}", ipv4.network(), ipv4.prefix());
+                // Skip loopback and NAT/host-only interfaces
+                if ip_str.starts_with("127.") || ip_str.starts_with("10.0.2.") {
+                    continue;
+                }
+                local_networks.push(ip_str);
             }
         }
     }
@@ -43,13 +48,13 @@ fn main() {
         for iface in &interfaces {
             for ip in &iface.ips {
                 if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
-                    let local_ip = ipv4.ip();
-                    let broadcast_ip = ipv4.broadcast();
-                    let ip_str = ipv4.to_string();
+                    let ip_str = format!("{}/{}", ipv4.network(), ipv4.prefix());
                     // Skip loopback and NAT/host-only interfaces
                     if ip_str.starts_with("127.") || ip_str.starts_with("10.0.2.") {
                         continue;
                     }
+                    let local_ip = ipv4.ip();
+                    let broadcast_ip = ipv4.broadcast();
                     let socket = UdpSocket::bind((local_ip, 0)).expect("Failed to bind socket");
                     socket.set_broadcast(true).unwrap();
                     let dest = SocketAddrV4::new(broadcast_ip, port);
@@ -79,27 +84,36 @@ fn main() {
 
         // Add a route for each discovered network (except our own)
         for (neighbor_ip, msg) in &topology {
-            // Ignore HelloMsg from ourselves (by router_id)
             if msg.router_id == hello.router_id {
                 continue;
             }
-            // Ignore HelloMsg that only advertises networks we already have (covers own IPs on all interfaces)
             if msg.networks.iter().all(|n| local_networks.contains(n)) {
                 continue;
             }
             for net in &msg.networks {
-                // Ignore our own networks, loopback, and NAT/host-only
                 if local_networks.contains(net)
                     || net.starts_with("127.")
                     || net.starts_with("10.0.2.")
                 {
                     continue;
                 }
+                // Only add route if net is a valid network address (not a host address)
+                let parts: Vec<&str> = net.split('/').collect();
+                if parts.len() == 2 {
+                    let addr = parts[0];
+                    let prefix = parts[1];
+                    if prefix == "24" {
+                        let octets: Vec<&str> = addr.split('.').collect();
+                        if octets.len() == 4 && octets[3] != "0" {
+                            // Not a network address for /24, skip
+                            continue;
+                        }
+                    }
+                }
                 println!("Adding route: ip route add {} via {}", net, neighbor_ip);
-                // Uncomment to actually add the route:
-                // let _ = std::process::Command::new("ip")
-                //     .args(&["route", "add", net, "via", &neighbor_ip.to_string()])
-                //     .status();
+                let _ = std::process::Command::new("ip")
+                    .args(&["route", "add", net, "via", &neighbor_ip.to_string()])
+                    .status();
             }
         }
 
