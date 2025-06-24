@@ -71,14 +71,20 @@ fn main() {
 
         // Add a route for each discovered network (except our own)
         for (neighbor_ip, msg) in &topology {
+            // Ignore HelloMsg from ourselves
+            if msg.router_id == hello.router_id {
+                continue;
+            }
             for net in &msg.networks {
-                if !local_networks.contains(net) {
-                    println!("Adding route: ip route add {} via {}", net, neighbor_ip);
-                    // Uncomment to actually add the route:
-                    // let _ = std::process::Command::new("ip")
-                    //     .args(&["route", "add", net, "via", &neighbor_ip.to_string()])
-                    //     .status();
+                // Ignore our own networks and loopback
+                if local_networks.contains(net) || net.starts_with("127.") {
+                    continue;
                 }
+                println!("Adding route: ip route add {} via {}", net, neighbor_ip);
+                // Uncomment to actually add the route:
+                // let _ = std::process::Command::new("ip")
+                //     .args(&["route", "add", net, "via", &neighbor_ip.to_string()])
+                //     .status();
             }
         }
 
