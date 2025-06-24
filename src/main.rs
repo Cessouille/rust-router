@@ -44,6 +44,8 @@ fn main() {
         .unwrap();
 
     let mut known_networks = local_networks.clone();
+    // Track: network -> (via_neighbor, last_seen)
+    let mut route_table: HashMap<String, (Ipv4Addr, Instant)> = HashMap::new();
 
     loop {
         // Broadcast hello on each interface, advertising all known networks
@@ -90,44 +92,61 @@ fn main() {
         }
         println!("Discovered topology: {:#?}", topology);
 
-        // Learn new networks from neighbors
-        for (_neighbor_ip, msg) in &topology {
+        // Learn new networks from neighbors and update route_table
+        for (neighbor_ip, msg) in &topology {
             for net in &msg.networks {
-                if !known_networks.contains(net)
-                    && !net.starts_with("127.")
-                    && !net.starts_with("10.0.2.")
-                {
-                    known_networks.push(net.clone());
+                if !net.starts_with("127.") && !net.starts_with("10.0.2.") {
+                    // Update route_table with the latest info
+                    route_table.insert(net.clone(), (*neighbor_ip, Instant::now()));
+                    if !known_networks.contains(net) {
+                        known_networks.push(net.clone());
+                    }
                 }
             }
         }
 
-        // Add a route for each discovered network (except our own)
-        for (neighbor_ip, msg) in &topology {
-            for net in &msg.networks {
-                if known_networks.contains(net)
-                    && !local_networks.contains(net)
-                    && !net.starts_with("127.")
-                    && !net.starts_with("10.0.2.")
-                {
-                    // Only add route if net is a valid network address (not a host address)
-                    let parts: Vec<&str> = net.split('/').collect();
-                    if parts.len() == 2 {
-                        let addr = parts[0];
-                        let prefix = parts[1];
-                        if prefix == "24" {
-                            let octets: Vec<&str> = addr.split('.').collect();
-                            if octets.len() == 4 && octets[3] != "0" {
-                                // Not a network address for /24, skip
-                                continue;
-                            }
+        // Remove expired routes (not seen for 15 seconds)
+        let expire_duration = Duration::from_secs(15);
+        route_table.retain(|_net, (_via, last_seen)| last_seen.elapsed() < expire_duration);
+        known_networks.retain(|net| route_table.contains_key(net) || local_networks.contains(net));
+
+        // Remove expired routes from system
+        for net in known_networks
+            .iter()
+            .filter(|n| !route_table.contains_key(*n) && !local_networks.contains(*n))
+        {
+            println!("Removing route: ip route del {}", net);
+            let _ = std::process::Command::new("ip")
+                .args(&["route", "del", net])
+                .status();
+        }
+
+        // Add or update a route for each discovered network (except our own)
+        for (net, (neighbor_ip, _last_seen)) in &route_table {
+            if !local_networks.contains(net)
+                && !net.starts_with("127.")
+                && !net.starts_with("10.0.2.")
+            {
+                // Only add route if net is a valid network address (not a host address)
+                let parts: Vec<&str> = net.split('/').collect();
+                if parts.len() == 2 {
+                    let addr = parts[0];
+                    let prefix = parts[1];
+                    if prefix == "24" {
+                        let octets: Vec<&str> = addr.split('.').collect();
+                        if octets.len() == 4 && octets[3] != "0" {
+                            // Not a network address for /24, skip
+                            continue;
                         }
                     }
-                    println!("Adding route: ip route add {} via {}", net, neighbor_ip);
-                    let _ = std::process::Command::new("ip")
-                        .args(&["route", "add", net, "via", &neighbor_ip.to_string()])
-                        .status();
                 }
+                println!(
+                    "Adding/replacing route: ip route replace {} via {}",
+                    net, neighbor_ip
+                );
+                let _ = std::process::Command::new("ip")
+                    .args(&["route", "replace", net, "via", &neighbor_ip.to_string()])
+                    .status();
             }
         }
 
