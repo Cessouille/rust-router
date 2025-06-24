@@ -67,7 +67,10 @@ fn main() {
             if let Ok((size, src)) = listen_socket.recv_from(&mut buf) {
                 if let Ok(msg) = serde_json::from_slice::<HelloMsg>(&buf[..size]) {
                     if let std::net::SocketAddr::V4(src_v4) = src {
-                        topology.insert(*src_v4.ip(), msg);
+                        // Ignore messages from ourselves
+                        if msg.router_id != hello.router_id {
+                            topology.insert(*src_v4.ip(), msg);
+                        }
                     }
                 }
             }
