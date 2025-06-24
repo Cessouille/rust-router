@@ -1,8 +1,7 @@
 use pnet::datalink;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::time::Duration;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct HelloMsg {
