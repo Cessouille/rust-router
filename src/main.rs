@@ -45,6 +45,11 @@ fn main() {
                 if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
                     let local_ip = ipv4.ip();
                     let broadcast_ip = ipv4.broadcast();
+                    let ip_str = ipv4.to_string();
+                    // Skip loopback and NAT/host-only interfaces
+                    if ip_str.starts_with("127.") || ip_str.starts_with("10.0.2.") {
+                        continue;
+                    }
                     let socket = UdpSocket::bind((local_ip, 0)).expect("Failed to bind socket");
                     socket.set_broadcast(true).unwrap();
                     let dest = SocketAddrV4::new(broadcast_ip, port);
