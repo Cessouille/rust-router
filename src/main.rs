@@ -1,5 +1,5 @@
 use hostname::get;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 struct Interface {
@@ -109,9 +109,6 @@ fn main() {
             }
         }
 
-        // Build a map of router name -> router
-        let router_map: HashMap<&str, &Router> = routers.iter().map(|r| (r.name, r)).collect();
-
         // Collect all networks
         let all_networks: HashSet<&str> = network_map.keys().cloned().collect();
 
@@ -121,55 +118,35 @@ fn main() {
             .iter()
             .map(|iface| iface.network)
             .collect();
-
         for &network in &all_networks {
             if directly_connected.contains(network) {
                 continue;
             }
-
-            // BFS to find the next hop router for this network
-            let mut visited: HashSet<&str> = HashSet::new();
-            let mut queue: VecDeque<(&str, Option<&str>, Option<&str>)> = VecDeque::new();
-            // (current_router, first_hop_ip, via_iface_ip)
-            queue.push_back((router.name, None, None));
-            let mut found = None;
-
-            while let Some((current_router, first_hop_ip, _via_iface_ip)) = queue.pop_front() {
-                if !visited.insert(current_router) {
-                    continue;
-                }
-                let current = router_map.get(current_router).unwrap();
-                // If current router is directly connected to the destination network
-                if current
-                    .interfaces
-                    .iter()
-                    .any(|iface| iface.network == network)
-                {
-                    if let Some(ip) = first_hop_ip {
-                        found = Some((network, ip));
-                    }
-                    break;
-                }
-                // Enqueue neighbors
-                for iface in &current.interfaces {
-                    if let Some(neighbors) = network_map.get(iface.network) {
-                        for &(neighbor_name, neighbor_ip) in neighbors {
-                            if neighbor_name == current_router {
-                                continue;
+            // Find a neighbor router that is connected to both a network we have and the target network
+            let mut next_hop = None;
+            for iface in &router.interfaces {
+                if let Some(neighbors) = network_map.get(iface.network) {
+                    for &(neighbor_name, neighbor_ip) in neighbors {
+                        if neighbor_name == router.name {
+                            continue;
+                        }
+                        // Only add route if neighbor is DIRECTLY connected to the destination network
+                        if let Some(neigh_ifaces) = network_map.get(network) {
+                            if neigh_ifaces
+                                .iter()
+                                .any(|(n_name, _)| *n_name == neighbor_name)
+                            {
+                                next_hop = Some((network, neighbor_ip));
+                                break;
                             }
-                            // The first hop from the original router
-                            let next_first_hop_ip = if current_router == router.name {
-                                Some(neighbor_ip)
-                            } else {
-                                first_hop_ip
-                            };
-                            queue.push_back((neighbor_name, next_first_hop_ip, Some(iface.ip)));
                         }
                     }
                 }
+                if next_hop.is_some() {
+                    break;
+                }
             }
-
-            if let Some((dest_net, via_ip)) = found {
+            if let Some((dest_net, via_ip)) = next_hop {
                 println!("Adding route: ip route add {} via {}", dest_net, via_ip);
                 let status = std::process::Command::new("ip")
                     .args(&["route", "add", dest_net, "via", via_ip])
@@ -180,7 +157,7 @@ fn main() {
                     Err(e) => eprintln!("  Error executing ip route: {}", e),
                 }
             } else {
-                println!("No route found for {}", network);
+                println!("No direct neighbor route found for {}", network);
             }
         }
     } else {
