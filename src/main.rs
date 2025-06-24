@@ -3,10 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -167,7 +164,16 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 }
                 let new_hops = neighbor_hops + 1;
                 let update = match known_networks.get(net) {
-                    Some(&(existing_hops, _, _)) => new_hops < existing_hops,
+                    Some(&(existing_hops, existing_via, _)) => {
+                        if new_hops < existing_hops {
+                            true
+                        } else if new_hops == existing_hops {
+                            // Tie-breaker: prefer lower IP address
+                            *neighbor_ip < existing_via
+                        } else {
+                            false
+                        }
+                    }
                     None => true,
                 };
                 if update {
