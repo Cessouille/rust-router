@@ -70,7 +70,7 @@ fn main() {
                         networks: known_networks
                             .iter()
                             .filter(|(_net, (_hops, via, _))| {
-                                *via != local_ip && *via != Ipv4Addr::UNSPECIFIED
+                                *via != local_ip
                             })
                             .map(|(n, (h, _, _))| (n.clone(), *h))
                             .collect(),
