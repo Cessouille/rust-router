@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -191,6 +194,7 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
         // Remove expired routes from system
         for (net, (_hops, _via, last_seen)) in &known_networks {
             if !local_networks.contains(net) && last_seen.elapsed() >= expire_duration {
+                println!("Expiring and removing route: {}", net);
                 let _ = std::process::Command::new("ip")
                     .args(&["route", "del", net])
                     .status();
