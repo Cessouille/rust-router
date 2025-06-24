@@ -63,6 +63,20 @@ fn main() {
                     }
                     let local_ip = ipv4.ip();
                     let broadcast_ip = ipv4.broadcast();
+
+                    // Split horizon: don't advertise routes learned from this neighbor
+                    let hello = HelloMsg {
+                        router_id: hostname::get().unwrap().to_string_lossy().to_string(),
+                        networks: known_networks
+                            .iter()
+                            .filter(|(_net, (_hops, via, _))| {
+                                *via != local_ip && *via != Ipv4Addr::UNSPECIFIED
+                            })
+                            .map(|(n, (h, _, _))| (n.clone(), *h))
+                            .collect(),
+                    };
+                    let hello_bytes = serde_json::to_vec(&hello).unwrap();
+
                     let socket = UdpSocket::bind((local_ip, 0)).expect("Failed to bind socket");
                     socket.set_broadcast(true).unwrap();
                     let dest = SocketAddrV4::new(broadcast_ip, port);
