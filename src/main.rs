@@ -71,13 +71,20 @@ fn main() {
 
         // Add a route for each discovered network (except our own)
         for (neighbor_ip, msg) in &topology {
-            // Ignore HelloMsg from ourselves
+            // Ignore HelloMsg from ourselves (by router_id)
             if msg.router_id == hello.router_id {
                 continue;
             }
+            // Ignore HelloMsg that only advertises networks we already have (covers own IPs on all interfaces)
+            if msg.networks.iter().all(|n| local_networks.contains(n)) {
+                continue;
+            }
             for net in &msg.networks {
-                // Ignore our own networks and loopback
-                if local_networks.contains(net) || net.starts_with("127.") {
+                // Ignore our own networks, loopback, and NAT/host-only
+                if local_networks.contains(net)
+                    || net.starts_with("127.")
+                    || net.starts_with("10.0.2.")
+                {
                     continue;
                 }
                 println!("Adding route: ip route add {} via {}", net, neighbor_ip);
