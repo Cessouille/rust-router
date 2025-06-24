@@ -185,13 +185,8 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
             }
         }
 
-        // Remove expired routes (not seen for 15 seconds)
-        let expire_duration = Duration::from_secs(15);
-        known_networks.retain(|net, &mut (_hops, _via, last_seen)| {
-            last_seen.elapsed() < expire_duration || local_networks.contains(net)
-        });
-
         // Remove expired routes from system
+        let expire_duration = Duration::from_secs(15);
         for (net, (_hops, _via, last_seen)) in &known_networks {
             if !local_networks.contains(net) && last_seen.elapsed() >= expire_duration {
                 println!("Expiring and removing route: {}", net);
@@ -200,6 +195,11 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                     .status();
             }
         }
+
+        // Now actually remove them from known_networks
+        known_networks.retain(|net, &mut (_hops, _via, last_seen)| {
+            last_seen.elapsed() < expire_duration || local_networks.contains(net)
+        });
 
         // Add or update a route for each discovered network (except our own)
         for (net, (hops, neighbor_ip, _last_seen)) in &known_networks {
