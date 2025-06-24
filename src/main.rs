@@ -51,7 +51,7 @@ fn main() {
                 .map(|(n, (h, _, _))| (n.clone(), *h))
                 .collect(),
         };
-        let hello_bytes = serde_json::to_vec(&hello).unwrap();
+        let _hello_bytes = serde_json::to_vec(&hello).unwrap();
 
         // Broadcast hello on each interface
         for iface in &interfaces {
