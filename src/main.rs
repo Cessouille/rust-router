@@ -1,17 +1,71 @@
 use pnet::datalink;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HelloMsg {
     router_id: String,
-    networks: Vec<(String, u32)>, // (network, hop_count)
+    networks: Vec<(String, u32)>,
 }
 
 fn main() {
+    let neighbors = Arc::new(Mutex::new(HashMap::<Ipv4Addr, String>::new()));
+    let running = Arc::new(AtomicBool::new(false));
+    let mut handle: Option<std::thread::JoinHandle<()>> = None;
+
+    loop {
+        println!("Rust Router CLI");
+        println!("1. Enable/Disable dynamic routing");
+        println!("2. List last known neighbor routers");
+        println!("3. Exit");
+        print!("Enter your choice: ");
+        io::stdout().flush().unwrap();
+
+        let mut choice = String::new();
+        io::stdin().read_line(&mut choice).unwrap();
+        match choice.trim() {
+            "1" => {
+                if running.load(Ordering::SeqCst) {
+                    println!("Disabling dynamic routing...");
+                    running.store(false, Ordering::SeqCst);
+                    if let Some(h) = handle.take() {
+                        h.join().ok();
+                    }
+                } else {
+                    println!("Enabling dynamic routing...");
+                    running.store(true, Ordering::SeqCst);
+                    let running_clone = running.clone();
+                    let neighbors_clone = neighbors.clone();
+                    handle = Some(thread::spawn(move || {
+                        run_dynamic_routing(running_clone, neighbors_clone);
+                    }));
+                }
+            }
+            "2" => {
+                list_neighbors(&neighbors);
+            }
+            "3" => {
+                println!("Exiting.");
+                running.store(false, Ordering::SeqCst);
+                if let Some(h) = handle.take() {
+                    h.join().ok();
+                }
+                break;
+            }
+            _ => println!("Invalid choice!"),
+        }
+    }
+}
+
+fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ipv4Addr, String>>>) {
     let port = 9999;
     let interfaces = datalink::interfaces();
 
@@ -30,7 +84,6 @@ fn main() {
         }
     }
 
-    // Track: network -> (hop_count, via_neighbor, last_seen)
     let mut known_networks: HashMap<String, (u32, Ipv4Addr, Instant)> = local_networks
         .iter()
         .map(|n| (n.clone(), (0, Ipv4Addr::UNSPECIFIED, Instant::now())))
@@ -42,18 +95,8 @@ fn main() {
         .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
 
-    loop {
-        // Build HelloMsg with all known networks and their hop counts
-        let hello = HelloMsg {
-            router_id: hostname::get().unwrap().to_string_lossy().to_string(),
-            networks: known_networks
-                .iter()
-                .map(|(n, (h, _, _))| (n.clone(), *h))
-                .collect(),
-        };
-        let _hello_bytes = serde_json::to_vec(&hello).unwrap();
-
-        // Broadcast hello on each interface
+    while running.load(Ordering::SeqCst) {
+        // Broadcast hello on each interface (split horizon)
         for iface in &interfaces {
             for ip in &iface.ips {
                 if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
@@ -64,14 +107,11 @@ fn main() {
                     let local_ip = ipv4.ip();
                     let broadcast_ip = ipv4.broadcast();
 
-                    // Split horizon: don't advertise routes learned from this neighbor
                     let hello = HelloMsg {
                         router_id: hostname::get().unwrap().to_string_lossy().to_string(),
                         networks: known_networks
                             .iter()
-                            .filter(|(_net, (_hops, via, _))| {
-                                *via != local_ip
-                            })
+                            .filter(|(_net, (_hops, via, _))| *via != local_ip)
                             .map(|(n, (h, _, _))| (n.clone(), *h))
                             .collect(),
                     };
@@ -81,7 +121,6 @@ fn main() {
                     socket.set_broadcast(true).unwrap();
                     let dest = SocketAddrV4::new(broadcast_ip, port);
                     socket.send_to(&hello_bytes, dest).ok();
-                    println!("Sent hello from {} to {}", local_ip, broadcast_ip);
                 }
             }
         }
@@ -95,14 +134,20 @@ fn main() {
                 if let Ok(msg) = serde_json::from_slice::<HelloMsg>(&buf[..size]) {
                     if let std::net::SocketAddr::V4(src_v4) = src {
                         // Ignore messages from ourselves
-                        if msg.router_id != hello.router_id {
-                            topology.insert(*src_v4.ip(), msg);
+                        if msg.router_id != hostname::get().unwrap().to_string_lossy() {
+                            topology.insert(*src_v4.ip(), msg.clone());
                         }
                     }
                 }
             }
         }
-        println!("Discovered topology: {:#?}", topology);
+
+        // Update last known neighbors
+        let mut neigh = neighbors.lock().unwrap();
+        neigh.clear();
+        for (ip, msg) in &topology {
+            neigh.insert(*ip, msg.router_id.clone());
+        }
 
         // Learn new networks from neighbors and update known_networks
         for (neighbor_ip, msg) in &topology {
@@ -130,7 +175,6 @@ fn main() {
         // Remove expired routes from system
         for (net, (_hops, _via, last_seen)) in &known_networks {
             if !local_networks.contains(net) && last_seen.elapsed() >= expire_duration {
-                println!("Removing route: ip route del {}", net);
                 let _ = std::process::Command::new("ip")
                     .args(&["route", "del", net])
                     .status();
@@ -158,16 +202,23 @@ fn main() {
                     }
                 }
             }
-            println!(
-                "Adding/replacing route: ip route replace {} via {}",
-                net, neighbor_ip
-            );
             let _ = std::process::Command::new("ip")
                 .args(&["route", "replace", net, "via", &neighbor_ip.to_string()])
                 .status();
         }
 
-        // Wait before next round
         thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn list_neighbors(neighbors: &Arc<Mutex<HashMap<Ipv4Addr, String>>>) {
+    let neigh = neighbors.lock().unwrap();
+    if neigh.is_empty() {
+        println!("No neighbors discovered yet.");
+    } else {
+        println!("Last known neighbor routers:");
+        for (ip, name) in neigh.iter() {
+            println!("{} - {}", ip, name);
+        }
     }
 }
