@@ -13,15 +13,17 @@ use std::time::{Duration, Instant};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct HelloMsg {
     router_id: String,
-    networks: Vec<(String, u32)>,
+    networks: Vec<(String, u32)>, // (network, hop_count)
 }
 
 fn main() {
+    // Shared state for neighbor list and dynamic routing status
     let neighbors = Arc::new(Mutex::new(HashMap::<Ipv4Addr, String>::new()));
     let running = Arc::new(AtomicBool::new(false));
     let mut handle: Option<std::thread::JoinHandle<()>> = None;
 
     loop {
+        // CLI menu
         println!("\n==============================");
         println!("      Rust Router CLI");
         println!("==============================");
@@ -43,23 +45,26 @@ fn main() {
         io::stdin().read_line(&mut choice).unwrap();
         match choice.trim() {
             "1" => {
+                // Toggle dynamic routing thread
                 if running.load(Ordering::SeqCst) {
                     println!("\n[!] Disabling dynamic routing...");
                     running.store(false, Ordering::SeqCst);
                     if let Some(h) = handle.take() {
-                        h.join().ok();
+                        h.join().ok(); // Wait for thread to finish
                     }
                 } else {
                     println!("\n[+] Enabling dynamic routing...");
                     running.store(true, Ordering::SeqCst);
                     let running_clone = running.clone();
                     let neighbors_clone = neighbors.clone();
+                    // Spawn routing logic in a background thread
                     handle = Some(thread::spawn(move || {
                         run_dynamic_routing(running_clone, neighbors_clone);
                     }));
                 }
             }
             "2" => {
+                // Print last known neighbors
                 list_neighbors(&neighbors);
             }
             "3" => {
@@ -75,17 +80,17 @@ fn main() {
     }
 }
 
+/// Main dynamic routing logic, runs in a background thread
 fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ipv4Addr, String>>>) {
     let port = 9999;
     let interfaces = datalink::interfaces();
 
-    // Gather all local networks
+    // Gather all local networks (excluding loopback and NAT/host-only)
     let mut local_networks = Vec::new();
     for iface in &interfaces {
         for ip in &iface.ips {
             if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
                 let ip_str = format!("{}/{}", ipv4.network(), ipv4.prefix());
-                // Skip loopback and NAT/host-only interfaces
                 if ip_str.starts_with("127.") || ip_str.starts_with("10.0.2.") {
                     continue;
                 }
@@ -94,11 +99,16 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
         }
     }
 
+    // known_networks: network -> (hop_count, via_neighbor, last_seen)
     let mut known_networks: HashMap<String, (u32, Ipv4Addr, Instant)> = local_networks
         .iter()
         .map(|n| (n.clone(), (0, Ipv4Addr::UNSPECIFIED, Instant::now())))
         .collect();
 
+    // Poison reverse: network -> cycles left to advertise as unreachable
+    let mut poisoned_routes: HashMap<String, u8> = HashMap::new();
+
+    // UDP socket for sending/receiving hello messages
     let listen_socket = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind listen socket");
     listen_socket.set_broadcast(true).unwrap();
     listen_socket
@@ -106,7 +116,7 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
         .unwrap();
 
     while running.load(Ordering::SeqCst) {
-        // Broadcast hello on each interface (split horizon)
+        // --- Send hello messages (split horizon) ---
         for iface in &interfaces {
             for ip in &iface.ips {
                 if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
@@ -117,6 +127,7 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                     let local_ip = ipv4.ip();
                     let broadcast_ip = ipv4.broadcast();
 
+                    // Split horizon: don't advertise routes learned from this neighbor
                     let hello = HelloMsg {
                         router_id: hostname::get().unwrap().to_string_lossy().to_string(),
                         networks: known_networks
@@ -127,6 +138,7 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                     };
                     let hello_bytes = serde_json::to_vec(&hello).unwrap();
 
+                    // Bind to local IP and send broadcast
                     let socket = UdpSocket::bind((local_ip, 0)).expect("Failed to bind socket");
                     socket.set_broadcast(true).unwrap();
                     let dest = SocketAddrV4::new(broadcast_ip, port);
@@ -135,7 +147,7 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
             }
         }
 
-        // Listen for hello packets for a few seconds
+        // --- Listen for hello packets from neighbors ---
         let start = Instant::now();
         let mut topology: HashMap<Ipv4Addr, HelloMsg> = HashMap::new();
         let mut buf = [0u8; 512];
@@ -152,20 +164,21 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
             }
         }
 
-        // Update last known neighbors
+        // --- Update last known neighbors (shared with CLI) ---
         let mut neigh = neighbors.lock().unwrap();
         neigh.clear();
         for (ip, msg) in &topology {
             neigh.insert(*ip, msg.router_id.clone());
         }
 
-        // Learn new networks from neighbors and update known_networks
+        // --- Learn new networks from neighbors and update known_networks ---
         for (neighbor_ip, msg) in &topology {
             for (net, neighbor_hops) in &msg.networks {
                 if net.starts_with("127.") || net.starts_with("10.0.2.") {
                     continue;
                 }
                 let new_hops = neighbor_hops + 1;
+                // Only update if new path is better (lower hop count), or tie-breaker (lower IP)
                 let update = match known_networks.get(net) {
                     Some(&(existing_hops, existing_via, _)) => {
                         if new_hops < existing_hops {
@@ -185,22 +198,25 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
             }
         }
 
-        // Remove expired routes (not seen for 15 seconds)
+        // --- Remove expired routes from known_networks (not seen for 15 seconds) ---
         let expire_duration = Duration::from_secs(15);
+        let mut expired_nets = Vec::new();
         known_networks.retain(|net, &mut (_hops, _via, last_seen)| {
-            last_seen.elapsed() < expire_duration || local_networks.contains(net)
-        });
-
-        // Remove expired routes from system
-        for (net, (_hops, _via, last_seen)) in &known_networks {
-            if !local_networks.contains(net) && last_seen.elapsed() >= expire_duration {
-                let _ = std::process::Command::new("ip")
-                    .args(&["route", "del", net])
-                    .status();
+            let expired = last_seen.elapsed() >= expire_duration && !local_networks.contains(net);
+            if expired {
+                expired_nets.push(net.clone());
             }
+            !expired || local_networks.contains(net)
+        });
+        for net in expired_nets {
+            println!("Expiring and removing route: {}", net);
+            let _ = std::process::Command::new("ip")
+                .args(&["route", "del", &net])
+                .status();
+            poisoned_routes.insert(net, 3); // Poison for 3 cycles
         }
 
-        // Add or update a route for each discovered network (except our own)
+        // --- Add or update a route for each discovered network (except our own) ---
         for (net, (hops, neighbor_ip, _last_seen)) in &known_networks {
             if *hops == 0
                 || local_networks.contains(net)
@@ -226,10 +242,22 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 .status();
         }
 
+        // --- Handle poisoned routes (advertise as unreachable) ---
+        poisoned_routes.retain(|_net, cycles| {
+            if *cycles > 1 {
+                *cycles -= 1;
+                true
+            } else {
+                false
+            }
+        });
+
+        // Sleep before next round (controls protocol frequency)
         thread::sleep(Duration::from_secs(5));
     }
 }
 
+/// Print the last known neighbors (from shared state)
 fn list_neighbors(neighbors: &Arc<Mutex<HashMap<Ipv4Addr, String>>>) {
     let neigh = neighbors.lock().unwrap();
     println!("\n------------------------------");
