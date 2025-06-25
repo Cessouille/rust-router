@@ -1,3 +1,5 @@
+> Célian CHAUSSON - celian.chausson@etu.mines-ales.fr
+
 # Rapport d'intégration — Routeur Dynamique Rust
 
 ## 1. Présentation du programme
