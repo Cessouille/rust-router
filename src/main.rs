@@ -105,9 +105,6 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
         .map(|n| (n.clone(), (0, Ipv4Addr::UNSPECIFIED, Instant::now())))
         .collect();
 
-    // Poison reverse: network -> cycles left to advertise as unreachable
-    let mut poisoned_routes: HashMap<String, u8> = HashMap::new();
-
     // UDP socket for sending/receiving hello messages
     let listen_socket = UdpSocket::bind(("0.0.0.0", port)).expect("Failed to bind listen socket");
     listen_socket.set_broadcast(true).unwrap();
@@ -203,20 +200,17 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
 
         // --- Remove expired routes from known_networks (not seen for 15 seconds) ---
         let expire_duration = Duration::from_secs(15);
-        let mut expired_nets = Vec::new();
         known_networks.retain(|net, &mut (_hops, _via, last_seen)| {
-            let expired = last_seen.elapsed() >= expire_duration && !local_networks.contains(net);
-            if expired {
-                expired_nets.push(net.clone());
-            }
-            !expired || local_networks.contains(net)
+            last_seen.elapsed() < expire_duration || local_networks.contains(net)
         });
-        for net in expired_nets {
-            println!("Expiring and removing route: {}", net);
-            let _ = std::process::Command::new("ip")
-                .args(&["route", "del", &net])
-                .status();
-            poisoned_routes.insert(net, 3); // Poison for 3 cycles
+
+        // --- Remove expired routes from system ---
+        for (net, (_hops, _via, last_seen)) in &known_networks {
+            if !local_networks.contains(net) && last_seen.elapsed() >= expire_duration {
+                let _ = std::process::Command::new("ip")
+                    .args(&["route", "del", net])
+                    .status();
+            }
         }
 
         // --- Add or update a route for each discovered network (except our own) ---
@@ -244,16 +238,6 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 .args(&["route", "replace", net, "via", &neighbor_ip.to_string()])
                 .status();
         }
-
-        // --- Handle poisoned routes (advertise as unreachable) ---
-        poisoned_routes.retain(|_net, cycles| {
-            if *cycles > 1 {
-                *cycles -= 1;
-                true
-            } else {
-                false
-            }
-        });
 
         // Sleep before next round (controls protocol frequency)
         thread::sleep(Duration::from_secs(5));
