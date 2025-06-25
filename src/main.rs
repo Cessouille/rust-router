@@ -194,6 +194,9 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 };
                 if update {
                     known_networks.insert(net.clone(), (new_hops, *neighbor_ip, Instant::now()));
+                } else if let Some(entry) = known_networks.get_mut(net) {
+                    // Refresh last_seen if we hear about the same route again
+                    entry.2 = Instant::now();
                 }
             }
         }
