@@ -1,6 +1,8 @@
+use chrono::Local;
 use pnet::datalink;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::sync::{
@@ -82,6 +84,13 @@ fn main() {
 
 /// Main dynamic routing logic, runs in a background thread
 fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ipv4Addr, String>>>) {
+    // Open log file for performance logs
+    let mut log_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("router_perf.log")
+        .expect("Unable to open log file");
+
     let port = 9999;
     let interfaces = datalink::interfaces();
 
@@ -113,7 +122,16 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
         .unwrap();
 
     while running.load(Ordering::SeqCst) {
+        writeln!(
+            log_file,
+            "\n========================== CYCLE =========================="
+        )
+        .unwrap();
+
+        let loop_start = Instant::now();
+
         // --- Send hello messages (split horizon) ---
+        let send_start = Instant::now();
         for iface in &interfaces {
             for ip in &iface.ips {
                 if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
@@ -143,8 +161,17 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 }
             }
         }
+        let send_duration = send_start.elapsed();
+        writeln!(
+            log_file,
+            "[{}] Time to send hellos: {:.2?}",
+            Local::now().format("%d/%m/%Y %H:%M:%S"),
+            send_duration
+        )
+        .unwrap();
 
         // --- Listen for hello packets from neighbors ---
+        let recv_start = Instant::now();
         let start = Instant::now();
         let mut topology: HashMap<Ipv4Addr, HelloMsg> = HashMap::new();
         let mut buf = [0u8; 512];
@@ -160,6 +187,21 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 }
             }
         }
+        let recv_duration = recv_start.elapsed();
+        writeln!(
+            log_file,
+            "[{}] Time spent receiving hellos: {:.2?}",
+            Local::now().format("%d/%m/%Y %H:%M:%S"),
+            recv_duration
+        )
+        .unwrap();
+        writeln!(
+            log_file,
+            "[{}] Number of hellos received: {}",
+            Local::now().format("%d/%m/%Y %H:%M:%S"),
+            topology.len()
+        )
+        .unwrap();
 
         // --- Update last known neighbors (shared with CLI) ---
         let mut neigh = neighbors.lock().unwrap();
@@ -235,6 +277,16 @@ fn run_dynamic_routing(running: Arc<AtomicBool>, neighbors: Arc<Mutex<HashMap<Ip
                 .args(&["route", "replace", net, "via", &neighbor_ip.to_string()])
                 .status();
         }
+
+        let loop_duration = loop_start.elapsed();
+        writeln!(
+            log_file,
+            "[{}] Full protocol loop duration: {:.2?}",
+            Local::now().format("%d/%m/%Y %H:%M:%S"),
+            loop_duration
+        )
+        .unwrap();
+        log_file.flush().unwrap();
 
         // Sleep before next round (controls protocol frequency)
         thread::sleep(Duration::from_secs(5));
