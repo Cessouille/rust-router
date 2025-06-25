@@ -61,7 +61,7 @@ Dynamic routing: DISABLED
 
 ## Fichier de logs
 
-Les métriques de performance sont enregistrées dans le fichier `router_perf.log` (ou `report.log` si renommé) à la racine du projet.  
+Les métriques de performance sont enregistrées dans le fichier `router_perf.log` à la racine du projet.  
 À chaque lancement, le fichier est réinitialisé.
 
 Vous y trouverez :
