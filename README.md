@@ -12,7 +12,7 @@ Le protocole repose sur l’échange de messages "hello" entre voisins, la mise 
 - **Rust** (édition stable, recommandé : 1.70+)
 - **Cargo** (installé avec Rust)
 - **Linux** (pour la gestion des routes système via `ip route`)
-- Droits administrateur (`sudo`) pour modifier la table de routage
+- **Droits administrateur** (`sudo`) pour modifier la table de routage
 
 ---
 
